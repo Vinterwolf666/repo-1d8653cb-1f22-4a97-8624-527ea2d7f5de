@@ -1,0 +1,91 @@
+name: Build and Deploy to GKE
+
+on:
+  push:
+    branches:
+      - main  
+
+env:
+  GOOGLE_PROJECT_ID: spiderops
+  GOOGLE_COMPUTE_ZONE: 'southamerica-east1'
+  GOOGLE_CLUSTER_NAME: 'clus98'
+  IMAGE_NAME: 'app98'
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  infrastructure:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Authenticate with Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GOOGLE_CREDENTIALS }}
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: latest
+
+      - name: Initialize Terraform
+        run: |
+          cd infras  # Asegúrate de que `main.tf` está en esta carpeta
+          terraform init
+      
+      - name: Create GCP credentials file
+        run: |
+          echo '${{ secrets.GOOGLE_CREDENTIALS }}' > gcp-key.json
+
+      - name: Apply Terraform (Create GKE & Artifact Registry)
+        run: |
+          cd infras
+          terraform apply -auto-approve \
+            -var="credentials=$(cat ../gcp-key.json)" \
+            -var="region=southamerica-east1" \
+            -var="cluster_name=clus98" \
+            -var="artifact_registry=repo98"
+
+  build:
+    runs-on: ubuntu-latest
+    needs: infrastructure
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Authenticate with Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GOOGLE_CREDENTIALS }}
+
+      - name: Build Docker image
+        run: |
+          docker build -t southamerica-east1-docker.pkg.dev/spiderops/repo98/$IMAGE_NAME:$IMAGE_TAG .
+
+      - name: Authenticate Docker to Artifact Registry
+        run: |
+          gcloud auth configure-docker southamerica-east1-docker.pkg.dev --quiet
+
+      - name: Push Docker image to Artifact Registry
+        run: |
+          docker push southamerica-east1-docker.pkg.dev/spiderops/repo98/$IMAGE_NAME:$IMAGE_TAG
+
+      - name: Set up gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: spiderops
+          install_components: 'kubectl'
+
+      - name: Get GKE credentials
+        run: |
+          gcloud container clusters get-credentials $GOOGLE_CLUSTER_NAME --zone $GOOGLE_COMPUTE_ZONE --project spiderops
+
+      - name: Deploy to GKE
+        run: |
+          kubectl apply -f resources.yaml
+
+      - name: Update Deployment with new image
+        run: |
+          kubectl set image deployment/my-app-deployment my-container=southamerica-east1-docker.pkg.dev/spiderops/repo98/$IMAGE_NAME:$IMAGE_TAG
+          kubectl rollout status deployment/my-app-deployment
